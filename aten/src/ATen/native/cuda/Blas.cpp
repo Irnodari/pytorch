@@ -523,6 +523,8 @@ Tensor& addmm_out_cuda_impl(Tensor& result, const Tensor& self, const Tensor& ma
   // if lt path fails, we recurse back into this function here and force the lt path to off
   // we cannot update variable disable_addmm_cuda_lt from above since it is static and would be permanent
   bool disable_addmm_cuda_lt = persistent_disable_addmm_cuda_lt || disable_addmm_cuda_lt_override;
+  // The approximate bf16 GEMM has no cuBLASLt counterpart; go straight to gemm().
+  disable_addmm_cuda_lt = disable_addmm_cuda_lt || (mat1.scalar_type() == at::kBFloat16 && at::cuda::blas::approxBf16GemmEnabled());
   #ifdef USE_ROCM
   // Conditioned on the device index, which is not persistent
   disable_addmm_cuda_lt = disable_addmm_cuda_lt || isGloballyDisabledAddmmCudaLt(self.device());

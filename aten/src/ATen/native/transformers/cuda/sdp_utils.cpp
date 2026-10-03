@@ -1088,6 +1088,16 @@ bool is_cudnn_attention_decode_disabled() {
 #endif
 }
 
+bool check_approx_bf16_gemm(sdp_params const& params, bool debug) {
+  if (params.query.scalar_type() == at::kBFloat16 && at::detail::getCUDAHooks().usesApproxBf16Gemm()) {
+    if (debug) {
+      TORCH_WARN("Fused attention kernels multiply on tensor cores, bypassing the approximate bf16 GEMM.");
+    }
+    return false;
+  }
+  return true;
+}
+
 bool can_use_cudnn_attention(const sdp_params& params, bool debug) {
 #if defined(USE_ROCM) || !AT_CUDNN_ENABLED() || !defined(CUDNN_VERSION)
   if (debug) {
@@ -1114,6 +1124,7 @@ bool can_use_cudnn_attention(const sdp_params& params, bool debug) {
   constexpr auto general_constraints =
       std::to_array<bool (*)(sdp_params const&, bool)>({
           check_runtime_disabled_cudnn,
+          check_approx_bf16_gemm,
           check_for_nested_inputs,
           check_all_tensors_on_device,
           check_tensor_shapes,
@@ -1177,6 +1188,7 @@ bool can_use_flash_attention(sdp_params const& params, bool debug) {
   // Define gate functions that determine if a flash kernel can be ran
   constexpr auto general_constraints = std::to_array<bool (*)(sdp_params const&, bool)>({
       check_runtime_disabled_flash,
+      check_approx_bf16_gemm,
       check_all_tensors_on_device,
       check_tensor_shapes,
       check_for_attn_mask,
@@ -1240,6 +1252,7 @@ bool can_use_mem_efficient_attention(sdp_params const& params, bool debug) {
   //  Define gate functions that determine if a mem efficient kernel can be ran
   constexpr auto general_constraints = std::to_array<bool (*)(sdp_params const&, bool)>({
       check_runtime_disabled_mem_efficient,
+      check_approx_bf16_gemm,
       check_all_tensors_on_device,
       check_mem_efficient_hardware_support,
       check_tensor_shapes,

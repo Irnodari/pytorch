@@ -738,8 +738,10 @@ const std::optional<at::Tensor>& offs,
 const std::optional<at::Tensor>& bias,
 std::optional<c10::ScalarType> out_dtype) {
   _grouped_mm_validate_inputs(mat_a, mat_b, offs, bias, out_dtype);
+  // The fallback runs one mm per group, which goes through the approximate bf16 GEMM.
+  const bool use_approx_bf16 = mat_a.dtype() == at::kBFloat16 && at::cuda::blas::approxBf16GemmEnabled();
 #if !defined(USE_ROCM) && defined(CUDA_VERSION) && CUDA_VERSION >= 13030
-  if (should_use_cublaslt_grouped_gemm(mat_a, mat_b, offs, out_dtype)) {
+  if (!use_approx_bf16 && should_use_cublaslt_grouped_gemm(mat_a, mat_b, offs, out_dtype)) {
     return grouped_mm_cublaslt(mat_a, mat_b, offs, bias, out_dtype);
   }
 #endif
@@ -749,7 +751,7 @@ std::optional<c10::ScalarType> out_dtype) {
     out_dtype.value_or(at::kBFloat16) == at::kBFloat16
   );
 #ifndef USE_ROCM
-  bool use_fast_path = scaled_mm_arch_allowed(/*sm90_only=*/true, /*sm100_only=*/true) && a_b_and_out_are_bf16;
+  bool use_fast_path = scaled_mm_arch_allowed(/*sm90_only=*/true, /*sm100_only=*/true) && a_b_and_out_are_bf16 && !use_approx_bf16;
   const auto out_dtype_ = _resolve_grouped_mm_out_dtype(mat_a, mat_b, out_dtype);
   Tensor out = create_grouped_gemm_output_tensor(mat_a, mat_b, offs, out_dtype_);
   if (use_fast_path) {

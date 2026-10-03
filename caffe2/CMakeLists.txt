@@ -1159,6 +1159,53 @@ elseif(USE_CUDA)
   if(USE_MEM_EFF_ATTENTION)
     target_compile_definitions(torch_cuda PRIVATE USE_MEM_EFF_ATTENTION)
   endif()
+  if(USE_APPROX_BF16_GEMM)
+    if(NOT APPROX_BF16_ROOT)
+      set(APPROX_BF16_ROOT "/usr/local")
+    endif()
+    if(NOT APPROX_BF16_CUTLASS_DIR)
+      set(APPROX_BF16_CUTLASS_DIR "${PROJECT_SOURCE_DIR}/../cutlass")
+    endif()
+    find_path(APPROX_BF16_INCLUDE_DIR approx_bf16/bfloat16.h
+      HINTS ${APPROX_BF16_ROOT}/include REQUIRED)
+    find_library(APPROX_BF16_HOST_LIB approx_bf16
+      HINTS ${APPROX_BF16_ROOT}/lib REQUIRED)
+    find_library(APPROX_BF16_DEVICE_LIB approx_bf16_device
+      HINTS ${APPROX_BF16_ROOT}/lib REQUIRED)
+    if(NOT EXISTS "${APPROX_BF16_CUTLASS_DIR}/include/cutlass/bfloat16.h")
+      message(FATAL_ERROR "USE_APPROX_BF16_GEMM: no CUTLASS found at APPROX_BF16_CUTLASS_DIR=${APPROX_BF16_CUTLASS_DIR}")
+    endif()
+    message(STATUS "Approximate bf16 GEMM: CUTLASS ${APPROX_BF16_CUTLASS_DIR}, ${APPROX_BF16_HOST_LIB}, ${APPROX_BF16_DEVICE_LIB}")
+
+    # libapprox_bf16's device code can only be linked with -rdc, which is not
+    # viable for libtorch_cuda, and CUTLASS_APPROX_BF16 changes the definition of
+    # cutlass::bfloat16_t, which must not leak into the CUTLASS kernels of
+    # libtorch_cuda. So the GEMM lives in its own shared library with hidden
+    # visibility.
+    add_library(torch_approx_bf16_gemm SHARED
+        "${PROJECT_SOURCE_DIR}/aten/src/ATen/native/cuda/approx_bf16/ApproxBf16Gemm.cu")
+    target_include_directories(torch_approx_bf16_gemm BEFORE PRIVATE
+        "${APPROX_BF16_CUTLASS_DIR}/include"
+        "${APPROX_BF16_INCLUDE_DIR}"
+        "${PROJECT_SOURCE_DIR}/aten/src")
+    target_compile_definitions(torch_approx_bf16_gemm PRIVATE CUTLASS_APPROX_BF16=1)
+    target_compile_options(torch_approx_bf16_gemm PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-rdc=true --expt-relaxed-constexpr>)
+    set_target_properties(torch_approx_bf16_gemm PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        CUDA_VISIBILITY_PRESET hidden
+        CXX_VISIBILITY_PRESET hidden)
+    target_link_libraries(torch_approx_bf16_gemm PRIVATE
+        ${APPROX_BF16_DEVICE_LIB}
+        ${APPROX_BF16_HOST_LIB}
+        torch::cudart)
+    get_filename_component(APPROX_BF16_LIB_DIR "${APPROX_BF16_HOST_LIB}" DIRECTORY)
+    set_property(TARGET torch_approx_bf16_gemm APPEND PROPERTY INSTALL_RPATH "${APPROX_BF16_LIB_DIR}")
+    target_compile_definitions(torch_cuda PRIVATE USE_APPROX_BF16_GEMM)
+    target_link_libraries(torch_cuda PRIVATE torch_approx_bf16_gemm)
+    install(TARGETS torch_approx_bf16_gemm DESTINATION "${TORCH_INSTALL_LIB_DIR}")
+  endif()
   if(BUILD_LAZY_CUDA_LINALG)
     add_library(torch_cuda_linalg ${ATen_CUDA_LINALG_SRCS})
     target_compile_definitions(torch_cuda_linalg PRIVATE USE_CUDA BUILD_LAZY_CUDA_LINALG)

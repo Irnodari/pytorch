@@ -9,10 +9,15 @@
 #include <ATen/cuda/tunable/Tunable.h>
 #include <ATen/cuda/tunable/TunableGemm.h>
 #include <c10/macros/Export.h>
+#include <c10/util/env.h>
 #include <c10/util/irange.h>
 
 #include <ATen/cuda/detail/BLASConstants.h>
 #include <ATen/cuda/detail/CublasLtUtils.h>
+
+#ifdef USE_APPROX_BF16_GEMM
+#include <ATen/native/cuda/approx_bf16/ApproxBf16Gemm.h>
+#endif
 
 #ifdef USE_ROCM
 #include <c10/cuda/CUDAStream.h>
@@ -225,6 +230,31 @@ using detail::CuBlasLtMatmulPreference;
 using detail::CublasLtWorkspace;
 #if !defined(USE_ROCM) && defined(CUDA_VERSION) && CUDA_VERSION >= 13030
 using detail::CuBlasLtGroupedMatrixLayout;
+#endif
+
+bool approxBf16GemmEnabled() {
+#ifdef USE_APPROX_BF16_GEMM
+  static const bool enabled = c10::utils::check_env("TORCH_APPROX_BF16_GEMM") != false;
+  return enabled;
+#else
+  return false;
+#endif
+}
+
+#ifdef USE_APPROX_BF16_GEMM
+namespace {
+
+template <typename C_Dtype>
+void approx_bf16_bgemm(CUDABLAS_BGEMM_ARGTYPES_AND_C_DTYPE(at::BFloat16, C_Dtype)) {
+  static const bool bf16_accumulate = c10::utils::get_env("TORCH_APPROX_BF16_GEMM_ACC") == "bf16";
+  const char* error = at::native::approx_bf16::bgemm(
+      transa, transb, m, n, k, alpha, a, lda, stridea, b, ldb, strideb, beta,
+      c, std::is_same_v<C_Dtype, float>, ldc, stridec, num_batches,
+      bf16_accumulate, at::cuda::getCurrentCUDAStream());
+  TORCH_CHECK(error == nullptr, "at::cuda::blas: approximate bf16 CUTLASS GEMM failed: ", error);
+}
+
+} // namespace
 #endif
 
 /* LEVEL 3 BLAS FUNCTIONS */
@@ -962,6 +992,12 @@ void bgemm<at::Half>(CUDABLAS_BGEMM_ARGTYPES(at::Half)) {
 
 template <>
 void bgemm<at::BFloat16>(CUDABLAS_BGEMM_ARGTYPES(at::BFloat16)) {
+#ifdef USE_APPROX_BF16_GEMM
+  if (approxBf16GemmEnabled()) {
+    approx_bf16_bgemm<at::BFloat16>(CUDABLAS_BGEMM_ARGS(at::BFloat16));
+    return;
+  }
+#endif
   auto tuning_ctx = at::cuda::tunable::getTuningContext();
   if (tuning_ctx->IsTunableOpEnabled()
       && bgemm_tunable<at::BFloat16>(CUDABLAS_BGEMM_ARGS(at::BFloat16))) {
@@ -979,6 +1015,12 @@ void bgemm<at::Half, float>(CUDABLAS_BGEMM_ARGTYPES_AND_C_DTYPE(at::Half, float)
 
 template <>
 void bgemm<at::BFloat16, float>(CUDABLAS_BGEMM_ARGTYPES_AND_C_DTYPE(at::BFloat16, float)) {
+#ifdef USE_APPROX_BF16_GEMM
+  if (approxBf16GemmEnabled()) {
+    approx_bf16_bgemm<float>(CUDABLAS_BGEMM_ARGS(at::BFloat16));
+    return;
+  }
+#endif
   #ifndef USE_ROCM
     cudaDeviceProp* prop = at::cuda::getCurrentDeviceProperties();
 
@@ -1534,6 +1576,12 @@ void gemm<at::Half>(CUDABLAS_GEMM_ARGTYPES(at::Half)) {
 
 template <>
 void gemm<at::BFloat16>(CUDABLAS_GEMM_ARGTYPES(at::BFloat16)) {
+#ifdef USE_APPROX_BF16_GEMM
+  if (approxBf16GemmEnabled()) {
+    approx_bf16_bgemm<at::BFloat16>(transa, transb, m, n, k, alpha, a, lda, 0, b, ldb, 0, beta, c, ldc, 0, 1);
+    return;
+  }
+#endif
   auto tuning_ctx = at::cuda::tunable::getTuningContext();
   if (tuning_ctx->IsTunableOpEnabled()
       && gemm_tunable<at::BFloat16>(CUDABLAS_GEMM_ARGS(at::BFloat16))) {
@@ -1551,6 +1599,12 @@ void gemm<at::Half, float>(CUDABLAS_GEMM_ARGTYPES_AND_C_DTYPE(at::Half, float)) 
 
 template <>
 void gemm<at::BFloat16, float>(CUDABLAS_GEMM_ARGTYPES_AND_C_DTYPE(at::BFloat16, float)) {
+#ifdef USE_APPROX_BF16_GEMM
+  if (approxBf16GemmEnabled()) {
+    approx_bf16_bgemm<float>(transa, transb, m, n, k, alpha, a, lda, 0, b, ldb, 0, beta, c, ldc, 0, 1);
+    return;
+  }
+#endif
   #ifndef USE_ROCM
     cudaDeviceProp* prop = at::cuda::getCurrentDeviceProperties();
 
@@ -1584,6 +1638,12 @@ bool gemm_and_bias(
   TORCH_INTERNAL_ASSERT(
       !(bias && c_ptr),
       "gemm_and_bias: bias and a distinct C operand are mutually exclusive");
+
+  // Returning false makes every caller fall back to gemm(), which routes bf16
+  // through the approximate CUTLASS GEMM.
+  if (std::is_same_v<Dtype, at::BFloat16> && approxBf16GemmEnabled()) {
+    return false;
+  }
 
   if (std::is_same_v<C_Dtype, float> && std::is_same_v<Dtype, at::BFloat16>) {
     #ifdef USE_ROCM

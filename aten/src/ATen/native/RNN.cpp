@@ -171,7 +171,9 @@ bool use_mkldnn(const Tensor& input, TensorList params, TensorList hx) {
 bool use_cudnn(const Tensor& t) {
   bool acceptable = at::cudnn_is_acceptable(t);
   auto st = t.scalar_type();
-  bool bfloat16_cond = st == kBFloat16 && at::detail::getCUDAHooks().supportsBFloat16RNNWithCuDNN();
+  // With the approximate bf16 GEMM, bf16 uses the native cells, whose linear/matmul it emulates.
+  bool bfloat16_cond = st == kBFloat16 && at::detail::getCUDAHooks().supportsBFloat16RNNWithCuDNN() &&
+      !at::detail::getCUDAHooks().usesApproxBf16Gemm();
   return acceptable && (bfloat16_cond || st == kDouble || st == kFloat || st == kHalf);
 }
 

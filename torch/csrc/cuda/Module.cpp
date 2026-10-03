@@ -167,6 +167,14 @@ static PyObject* THCPModule_isInBadFork(PyObject* self, PyObject* noargs) {
   END_HANDLE_TH_ERRORS
 }
 
+static PyObject* THCPModule_isApproxBf16GemmEnabled(
+    PyObject* self,
+    PyObject* noargs) {
+  HANDLE_TH_ERRORS
+  return PyBool_FromLong(at::detail::getCUDAHooks().usesApproxBf16Gemm());
+  END_HANDLE_TH_ERRORS
+}
+
 PyObject* THCPModule_getCurrentStream_wrap(
     PyObject* /* unused */,
     PyObject* device_index) {
@@ -2343,6 +2351,10 @@ static struct PyMethodDef _THCPModule_methods[] = {
      nullptr},
     {"_cuda_getArchFlags", THCPModule_getArchFlags, METH_NOARGS, nullptr},
     {"_cuda_isInBadFork", THCPModule_isInBadFork, METH_NOARGS, nullptr},
+    {"_cuda_isApproxBf16GemmEnabled",
+     THCPModule_isApproxBf16GemmEnabled,
+     METH_NOARGS,
+     nullptr},
     {"_cuda_getCurrentStream",
      THCPModule_getCurrentStream_wrap,
      METH_O,

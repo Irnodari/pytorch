@@ -61,6 +61,8 @@
 #   USE_ROCM_CK_SDPA=1       builds the CK SDPA backend on ROCm
 #   USE_ROCM_CK_SDPA_GFX12=1 enables CK SDPA for targeted gfx12 architectures
 #   USE_LAYERNORM_FAST_RECIPROCAL  fast reciprocals for layer norm (default on)
+#   USE_APPROX_BF16_GEMM=1   route CUDA bf16 GEMMs through the approximate CUTLASS
+#                            (libapprox_bf16); see APPROX_BF16_* below
 #   USE_MIMALLOC             static-link mimalloc into c10 (default: Windows/AArch64)
 #   USE_CUSTOM_DEBINFO="a.cpp;b.cpp"  build debug info only for the listed files
 #   USE_SYSTEM_LIBS          use system-provided third-party libraries; expands
@@ -100,6 +102,10 @@
 #   ACL_ROOT_DIR             Arm Compute Library location (read from env in
 #                            cmake/Modules/FindACL.cmake)
 #   LIBRARY_PATH / LD_LIBRARY_PATH   searched for libraries (compiler/linker native)
+#   APPROX_BF16_ROOT         install prefix of libapprox_bf16 (passthrough;
+#                            default /usr/local)
+#   APPROX_BF16_CUTLASS_DIR  approximate CUTLASS checkout (passthrough; default
+#                            ../cutlass next to the PyTorch checkout)
 #   CAFFE2_CUSTOM_PROTOC_EXECUTABLE  host protoc to use instead of the one built
 #                            from third_party/protobuf. Required when cross-compiling,
 #                            where the built protoc targets an architecture the build
@@ -135,6 +141,8 @@ set(_ENV_ALIASES
 # Additional env vars forwarded with the same name.
 set(_ENV_PASSTHROUGH
   UBSAN_FLAGS
+  APPROX_BF16_ROOT
+  APPROX_BF16_CUTLASS_DIR
   BLAS
   WITH_BLAS
   CUDA_HOST_COMPILER

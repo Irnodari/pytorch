@@ -3,6 +3,7 @@
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #include <ATen/Context.h>
 #include <ATen/DynamicLibrary.h>
+#include <ATen/cuda/CUDABlas.h>
 #include <ATen/cuda/CUDAConfig.h>
 #include <ATen/cuda/CUDADevice.h>
 #include <ATen/cuda/Exceptions.h>
@@ -334,6 +335,10 @@ bool CUDAHooks::supportsBFloat16RNNWithCuDNN() const {
 #else
   return false;
 #endif
+}
+
+bool CUDAHooks::usesApproxBf16Gemm() const {
+  return at::cuda::blas::approxBf16GemmEnabled();
 }
 
 long CUDAHooks::versionCuDNN() const {

@@ -10,6 +10,7 @@
 #include <ATen/NestedTensorImpl.h>
 #include <ATen/TensorIndexing.h>
 #include <ATen/TensorSubclassLikeUtils.h>
+#include <ATen/detail/CUDAHooksInterface.h>
 #include <ATen/native/transformers/attention.h>
 #include <ATen/native/transformers/sdp_utils_cpp.h>
 #include <c10/util/typeid.h>
@@ -909,24 +910,17 @@ std::tuple<Tensor, Tensor> _scaled_dot_product_attention_math(
   // Keep query, key, value in high precision for accuracy
   // NestedTensor reports issues for backward with autograd so disabled: must be
   // contiguous to get buffer.
-  auto query_acc = !ctx.allowFP16BF16ReductionMathSDP() &&
-          (query_.scalar_type() == at::kHalf ||
-           query_.scalar_type() == at::kBFloat16) &&
-          !query_.is_nested()
-      ? query_.to(at::kFloat)
-      : query_;
-  auto key_acc = !ctx.allowFP16BF16ReductionMathSDP() &&
-          (key.scalar_type() == at::kHalf ||
-           key.scalar_type() == at::kBFloat16) &&
-          !key.is_nested()
-      ? key.to(at::kFloat)
-      : key;
-  auto value_acc = !ctx.allowFP16BF16ReductionMathSDP() &&
-          (value.scalar_type() == at::kHalf ||
-           value.scalar_type() == at::kBFloat16) &&
-          !value.is_nested()
-      ? value.to(at::kFloat)
-      : value;
+  // bf16 stays bf16 when the approximate bf16 GEMM is active, so that it emulates the matmuls.
+  const bool keep_bf16 = query_.is_cuda() && at::detail::getCUDAHooks().usesApproxBf16Gemm();
+  const auto to_acc = [&](const Tensor& t) {
+    const auto st = t.scalar_type();
+    const bool upcast = !ctx.allowFP16BF16ReductionMathSDP() &&
+        (st == at::kHalf || (st == at::kBFloat16 && !keep_bf16)) && !t.is_nested();
+    return upcast ? t.to(at::kFloat) : t;
+  };
+  auto query_acc = to_acc(query_);
+  auto key_acc = to_acc(key);
+  auto value_acc = to_acc(value);
   auto attn_mask = attn_mask_;
   // Naive, composite implementation defined here.
 

@@ -420,6 +420,10 @@ struct ConvParams {
       }
     }
     if (input.scalar_type() == at::kBFloat16 || weight.scalar_type() == at::kBFloat16) {
+      // cuDNN would bypass the approximate bf16 GEMM; use the im2col + GEMM backends instead.
+      if (detail::getCUDAHooks().usesApproxBf16Gemm()) {
+        return false;
+      }
       if (!(detail::getCUDAHooks().supportsBFloat16ConvolutionWithCuDNNv8() && at::native::cudnnv8_enabled_check_debug())) {
         return false;
       }
@@ -438,6 +442,9 @@ struct ConvParams {
   // Use cudnn for FP16 depthwise convolutions
   bool use_cudnn_depthwise(const at::Tensor& input, const at::Tensor& weight) const  {
     if (!cudnn_enabled || !detail::getCUDAHooks().compiledWithCuDNN() || !input.is_cuda()) {
+      return false;
+    }
+    if (input.scalar_type() == at::kBFloat16 && detail::getCUDAHooks().usesApproxBf16Gemm()) {
       return false;
     }
     // native kernel doesn't support 64-bit non-splittable case
