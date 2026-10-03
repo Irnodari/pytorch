@@ -6,11 +6,13 @@
 # model compiled into the library.
 
 import ctypes
+import math
 import os
 import unittest
 
 import torch
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend
 from torch.testing._internal.common_device_type import (
     instantiate_device_type_tests,
     onlyCUDA,
@@ -20,6 +22,7 @@ from torch.testing._internal.common_utils import parametrize, run_tests, TestCas
 
 APPROX_ENABLED = getattr(torch._C, "_cuda_isApproxBf16GemmEnabled", lambda: False)()
 BF16_ACCUMULATE = os.environ.get("TORCH_APPROX_BF16_GEMM_ACC") == "bf16"
+CUDA_PROFILING = torch.profiler.ProfilerActivity.CUDA in torch.profiler.supported_activities()
 
 
 def to_bits(t):
@@ -30,7 +33,8 @@ def from_bits(bits, shape):
     return torch.tensor([x - 0x10000 if x >= 0x8000 else x for x in bits], dtype=torch.int16).view(torch.bfloat16).reshape(shape)
 
 
-def reference_mm(a, b, bias=None):
+def reference_mm(a, b, c=None):
+    """a @ b, plus c (m x n, applied with beta = 1) when given, as the CUTLASS kernel computes it."""
     # libtorch_approx_bf16_gemm already loaded the library, so this returns the same model.
     lib = ctypes.CDLL("libapprox_bf16.so.1")
     lib.approx_bf16_from_f32.restype = ctypes.c_uint16
@@ -42,7 +46,7 @@ def reference_mm(a, b, bias=None):
 
     (m, k), n = a.shape, b.shape[1]
     a_bits, b_bits = to_bits(a), to_bits(b)
-    bias_f = bias.float().cpu() if bias is not None else torch.zeros(n)
+    c_f = c.float().cpu().expand(m, n) if c is not None else None
     out = []
     for i in range(m):
         for j in range(n):
@@ -55,8 +59,9 @@ def reference_mm(a, b, bias=None):
                 acc = 0.0
                 for p in range(k):
                     acc = lib.approx_bf16_fma_f32(a_bits[i * k + p], b_bits[p * n + j], acc)
-            # The epilogue computes alpha * acc + beta * C in fp32 with alpha = beta = 1.
-            out.append(lib.approx_bf16_from_f32((torch.tensor(acc) + bias_f[j]).item()))
+            # The epilogue computes alpha * acc + beta * C in fp32, here with alpha = 1 and beta = 0 or 1.
+            acc = torch.tensor(acc) if c_f is None else torch.tensor(acc) + c_f[i, j]
+            out.append(lib.approx_bf16_from_f32(acc.item()))
     return from_bits(out, (m, n))
 
 
@@ -81,7 +86,7 @@ class TestApproxBf16Gemm(TestCase):
         x = torch.randn(6, 19, device=device, dtype=torch.bfloat16)
         w = torch.randn(5, 19, device=device, dtype=torch.bfloat16)
         bias = torch.randn(5, device=device, dtype=torch.bfloat16)
-        self.assertEqual(F.linear(x, w, bias).cpu(), reference_mm(x, w.t(), bias.cpu()), atol=0, rtol=0)
+        self.assertEqual(F.linear(x, w, bias).cpu(), reference_mm(x, w.t(), bias), atol=0, rtol=0)
 
     @onlyCUDA
     def test_bmm_matches_host_model(self, device):
@@ -91,6 +96,35 @@ class TestApproxBf16Gemm(TestCase):
         self.assertEqual(torch.bmm(a, b).cpu(), expected, atol=0, rtol=0)
 
     @onlyCUDA
+    def test_conv2d_matches_host_model(self, device):
+        # cuDNN is skipped for bf16, so conv2d is im2col followed by weight @ columns + bias, per sample.
+        x = torch.randn(2, 3, 8, 8, device=device, dtype=torch.bfloat16)
+        w = torch.randn(4, 3, 3, 3, device=device, dtype=torch.bfloat16)
+        bias = torch.randn(4, device=device, dtype=torch.bfloat16)
+        columns = F.unfold(x, kernel_size=3)
+        expected = torch.stack([reference_mm(w.view(4, -1), columns[i], bias[:, None]).view(4, 6, 6) for i in range(2)])
+        self.assertEqual(F.conv2d(x, w, bias).cpu(), expected, atol=0, rtol=0)
+
+    @onlyCUDA
+    def test_grouped_mm_matches_host_model(self, device):
+        a = torch.randn(32, 16, device=device, dtype=torch.bfloat16)
+        b = torch.randn(2, 16, 8, device=device, dtype=torch.bfloat16)
+        offs = torch.tensor([12, 32], device=device, dtype=torch.int32)
+        expected = torch.cat([reference_mm(a[:12], b[0]), reference_mm(a[12:], b[1])])
+        self.assertEqual(torch._grouped_mm(a, b, offs=offs).cpu(), expected, atol=0, rtol=0)
+
+    @onlyCUDA
+    def test_sdpa_uses_bf16_math(self, device):
+        q, k, v = (torch.randn(2, 4, 16, 32, device=device, dtype=torch.bfloat16) for _ in range(3))
+        self.assertEqual(torch._fused_sdp_choice(q, k, v), SDPBackend.MATH.value)
+        # Mirrors _scaled_dot_product_attention_math without the fp32 upcast; an upcast would
+        # run the matmuls in fp32 on cuBLAS and change the result.
+        scaling_factor = math.sqrt(1 / math.sqrt(32))
+        attn = torch._safe_softmax(torch.matmul(q * scaling_factor, k.transpose(-2, -1) * scaling_factor), -1)
+        self.assertEqual(F.scaled_dot_product_attention(q, k, v), torch.matmul(attn, v), atol=0, rtol=0)
+
+    @onlyCUDA
+    @unittest.skipIf(not CUDA_PROFILING, "requires a build with Kineto and CUPTI")
     @parametrize(
         "op",
         ["mm", "bmm", "linear", "linear_backward", "conv2d", "conv2d_backward", "sdpa", "sdpa_backward", "grouped_mm", "lstm"],
