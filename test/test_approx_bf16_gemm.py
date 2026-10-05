@@ -82,6 +82,28 @@ class TestApproxBf16Gemm(TestCase):
         self.assertEqual(torch.mm(a, b).cpu(), reference_mm(a, b), atol=0, rtol=0)
 
     @onlyCUDA
+    @parametrize("m,k,n", [(9, 24, 13), (70, 40, 66)])
+    def test_mm_special_values_match_host_model(self, device, m, k, n):
+        # Zeros (as after ReLU) stay on the kernels' thread-tile fast path; subnormals,
+        # huge or tiny exponents, infinities and NaNs send their tiles to the
+        # per-element path. Both must match the host model.
+        def make(shape, seed):
+            g = torch.Generator().manual_seed(seed)
+            x = torch.randn(shape, generator=g)
+            u = torch.rand(shape, generator=g)
+            sign = torch.where(torch.rand(shape, generator=g) < 0.5, -1.0, 1.0)
+            x = torch.where(u < 0.3, 0.0 * sign, x)
+            x = torch.where((u >= 0.30) & (u < 0.32), 3e-39 * sign * torch.rand(shape, generator=g), x)
+            x = torch.where((u >= 0.32) & (u < 0.34), x * 2.0**100, x)
+            x = torch.where((u >= 0.34) & (u < 0.36), x * 2.0**-100, x)
+            x = torch.where((u >= 0.360) & (u < 0.362), math.inf * sign, x)
+            x = torch.where((u >= 0.362) & (u < 0.364), math.nan, x)
+            return x.bfloat16().to(device)
+
+        a, b = make((m, k), 1), make((k, n), 2)
+        self.assertEqual(torch.mm(a, b).cpu(), reference_mm(a, b), atol=0, rtol=0, equal_nan=True)
+
+    @onlyCUDA
     def test_linear_with_bias_matches_host_model(self, device):
         x = torch.randn(6, 19, device=device, dtype=torch.bfloat16)
         w = torch.randn(5, 19, device=device, dtype=torch.bfloat16)
