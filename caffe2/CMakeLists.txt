@@ -1206,6 +1206,51 @@ elseif(USE_CUDA)
     target_link_libraries(torch_cuda PRIVATE torch_approx_bf16_gemm)
     install(TARGETS torch_approx_bf16_gemm EXPORT Caffe2Targets DESTINATION "${TORCH_INSTALL_LIB_DIR}")
   endif()
+  if(USE_APPROX_INT8_GEMM)
+    if(NOT APPROX_INT8_ROOT)
+      set(APPROX_INT8_ROOT "/usr/local")
+    endif()
+    if(NOT APPROX_INT8_CUTLASS_DIR)
+      set(APPROX_INT8_CUTLASS_DIR "${PROJECT_SOURCE_DIR}/../cutlass")
+    endif()
+    find_path(APPROX_INT8_INCLUDE_DIR approx_int8/int8.h
+      HINTS ${APPROX_INT8_ROOT}/include REQUIRED)
+    find_library(APPROX_INT8_HOST_LIB approx_int8
+      HINTS ${APPROX_INT8_ROOT}/lib REQUIRED)
+    find_library(APPROX_INT8_DEVICE_LIB approx_int8_device
+      HINTS ${APPROX_INT8_ROOT}/lib REQUIRED)
+    if(NOT EXISTS "${APPROX_INT8_CUTLASS_DIR}/include/cutlass/cutlass.h")
+      message(FATAL_ERROR "USE_APPROX_INT8_GEMM: no CUTLASS found at APPROX_INT8_CUTLASS_DIR=${APPROX_INT8_CUTLASS_DIR}")
+    endif()
+    message(STATUS "Approximate int8 GEMM: CUTLASS ${APPROX_INT8_CUTLASS_DIR}, ${APPROX_INT8_HOST_LIB}, ${APPROX_INT8_DEVICE_LIB}")
+
+    # libapprox_int8's device code can only be linked with -rdc, which is not
+    # viable for libtorch_cuda, so the GEMM lives in its own shared library with
+    # hidden visibility. It uses approx::aint8_t, not cutlass::bfloat16_t, so any
+    # CUTLASS checkout works (CUTLASS_APPROX_BF16 is not needed).
+    add_library(torch_approx_int8_gemm SHARED
+        "${PROJECT_SOURCE_DIR}/aten/src/ATen/native/cuda/approx_int8/ApproxInt8Gemm.cu")
+    target_include_directories(torch_approx_int8_gemm BEFORE PRIVATE
+        "${APPROX_INT8_CUTLASS_DIR}/include"
+        "${APPROX_INT8_INCLUDE_DIR}"
+        "${PROJECT_SOURCE_DIR}/aten/src")
+    target_compile_options(torch_approx_int8_gemm PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-rdc=true --expt-relaxed-constexpr>)
+    set_target_properties(torch_approx_int8_gemm PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        CUDA_VISIBILITY_PRESET hidden
+        CXX_VISIBILITY_PRESET hidden)
+    target_link_libraries(torch_approx_int8_gemm PRIVATE
+        ${APPROX_INT8_DEVICE_LIB}
+        ${APPROX_INT8_HOST_LIB}
+        torch::cudart)
+    get_filename_component(APPROX_INT8_LIB_DIR "${APPROX_INT8_HOST_LIB}" DIRECTORY)
+    set_property(TARGET torch_approx_int8_gemm APPEND PROPERTY INSTALL_RPATH "${APPROX_INT8_LIB_DIR}")
+    target_compile_definitions(torch_cuda PRIVATE USE_APPROX_INT8_GEMM)
+    target_link_libraries(torch_cuda PRIVATE torch_approx_int8_gemm)
+    install(TARGETS torch_approx_int8_gemm EXPORT Caffe2Targets DESTINATION "${TORCH_INSTALL_LIB_DIR}")
+  endif()
   if(BUILD_LAZY_CUDA_LINALG)
     add_library(torch_cuda_linalg ${ATen_CUDA_LINALG_SRCS})
     target_compile_definitions(torch_cuda_linalg PRIVATE USE_CUDA BUILD_LAZY_CUDA_LINALG)

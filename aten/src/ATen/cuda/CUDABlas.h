@@ -25,6 +25,12 @@ namespace at::cuda::blas {
 // SIMT kernels instead of cuBLAS/cuBLASLt.
 TORCH_CUDA_CU_API bool approxBf16GemmEnabled();
 
+// True when built with USE_APPROX_INT8_GEMM and not disabled with
+// TORCH_APPROX_INT8_GEMM=0: int8 GEMMs (int8_gemm, i.e. torch._int_mm) then run
+// on CUTLASS SIMT kernels whose multiply-accumulate is libapprox_int8's model,
+// instead of cuBLASLt.
+TORCH_CUDA_CU_API bool approxInt8GemmEnabled();
+
 inline bool useBF16x9() {
   // NoTF32Guard is the existing force-IEEE override for CUDA FP32 matmul, so
   // it must also suppress other non-IEEE modes.

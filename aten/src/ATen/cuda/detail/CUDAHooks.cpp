@@ -341,6 +341,10 @@ bool CUDAHooks::usesApproxBf16Gemm() const {
   return at::cuda::blas::approxBf16GemmEnabled();
 }
 
+bool CUDAHooks::usesApproxInt8Gemm() const {
+  return at::cuda::blas::approxInt8GemmEnabled();
+}
+
 long CUDAHooks::versionCuDNN() const {
 #if AT_CUDNN_ENABLED()
   return CUDNN_VERSION;

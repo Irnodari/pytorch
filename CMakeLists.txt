@@ -431,6 +431,10 @@ cmake_dependent_option(
   USE_APPROX_BF16_GEMM
   "Route CUDA bf16 GEMMs through the approximate CUTLASS (libapprox_bf16)" OFF
   "USE_CUDA;UNIX;NOT APPLE" OFF)
+cmake_dependent_option(
+  USE_APPROX_INT8_GEMM
+  "Route CUDA int8 GEMMs (torch._int_mm) through CUTLASS SIMT kernels over libapprox_int8" OFF
+  "USE_CUDA;UNIX;NOT APPLE" OFF)
 option(USE_NNPACK "Use NNPACK" ON)
 cmake_dependent_option(USE_NUMA "Use NUMA. Only available on Linux." ON "LINUX"
                        OFF)

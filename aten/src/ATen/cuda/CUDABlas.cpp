@@ -19,6 +19,10 @@
 #include <ATen/native/cuda/approx_bf16/ApproxBf16Gemm.h>
 #endif
 
+#ifdef USE_APPROX_INT8_GEMM
+#include <ATen/native/cuda/approx_int8/ApproxInt8Gemm.h>
+#endif
+
 #ifdef USE_ROCM
 #include <c10/cuda/CUDAStream.h>
 #include <hipblaslt/hipblaslt-ext.hpp>
@@ -235,6 +239,15 @@ using detail::CuBlasLtGroupedMatrixLayout;
 bool approxBf16GemmEnabled() {
 #ifdef USE_APPROX_BF16_GEMM
   static const bool enabled = c10::utils::check_env("TORCH_APPROX_BF16_GEMM") != false;
+  return enabled;
+#else
+  return false;
+#endif
+}
+
+bool approxInt8GemmEnabled() {
+#ifdef USE_APPROX_INT8_GEMM
+  static const bool enabled = c10::utils::check_env("TORCH_APPROX_INT8_GEMM") != false;
   return enabled;
 #else
   return false;
@@ -2267,6 +2280,15 @@ void int8_gemm(
     int64_t mat2_ld,
     int32_t* result_ptr,
     int64_t result_ld) {
+#ifdef USE_APPROX_INT8_GEMM
+  if (approxInt8GemmEnabled()) {
+    const char* error = at::native::approx_int8::int8_gemm(
+        transpose_mat1, transpose_mat2, m, n, k, mat1_ptr, mat1_ld, mat2_ptr,
+        mat2_ld, result_ptr, result_ld, at::cuda::getCurrentCUDAStream());
+    TORCH_CHECK(error == nullptr, "at::cuda::blas: approximate int8 CUTLASS GEMM failed: ", error);
+    return;
+  }
+#endif
 
   cublasComputeType_t computeType = CUBLAS_COMPUTE_32I;
   cudaDataType_t scaleType = CUDA_R_32I;

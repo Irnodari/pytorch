@@ -63,6 +63,8 @@
 #   USE_LAYERNORM_FAST_RECIPROCAL  fast reciprocals for layer norm (default on)
 #   USE_APPROX_BF16_GEMM=1   route CUDA bf16 GEMMs through the approximate CUTLASS
 #                            (libapprox_bf16); see APPROX_BF16_* below
+#   USE_APPROX_INT8_GEMM=1   route CUDA int8 GEMMs (torch._int_mm) through CUTLASS
+#                            SIMT kernels over libapprox_int8; see APPROX_INT8_* below
 #   USE_MIMALLOC             static-link mimalloc into c10 (default: Windows/AArch64)
 #   USE_CUSTOM_DEBINFO="a.cpp;b.cpp"  build debug info only for the listed files
 #   USE_SYSTEM_LIBS          use system-provided third-party libraries; expands
@@ -104,6 +106,10 @@
 #   LIBRARY_PATH / LD_LIBRARY_PATH   searched for libraries (compiler/linker native)
 #   APPROX_BF16_ROOT         install prefix of libapprox_bf16 (passthrough;
 #                            default /usr/local)
+#   APPROX_INT8_ROOT         install prefix of libapprox_int8 (passthrough;
+#                            default /usr/local)
+#   APPROX_INT8_CUTLASS_DIR  CUTLASS checkout for the int8 GEMM (passthrough;
+#                            default ../cutlass next to the PyTorch checkout)
 #   APPROX_BF16_CUTLASS_DIR  approximate CUTLASS checkout (passthrough; default
 #                            ../cutlass next to the PyTorch checkout)
 #   CAFFE2_CUSTOM_PROTOC_EXECUTABLE  host protoc to use instead of the one built
@@ -143,6 +149,8 @@ set(_ENV_PASSTHROUGH
   UBSAN_FLAGS
   APPROX_BF16_ROOT
   APPROX_BF16_CUTLASS_DIR
+  APPROX_INT8_ROOT
+  APPROX_INT8_CUTLASS_DIR
   BLAS
   WITH_BLAS
   CUDA_HOST_COMPILER
