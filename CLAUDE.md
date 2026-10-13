@@ -347,3 +347,75 @@ When using `<cuda/ptx>` typed wrappers for PTX instructions:
 
 Before changing `torch/distributed/`, `torch/csrc/distributed/`, or
 `test/distributed/`, read and follow `torch/distributed/AGENTS.md`.
+
+# Approximate arithmetic fork (branch `int8`)
+
+This checkout is a research fork, not an upstream PR: CUDA GEMMs can run
+through emulated approximate arithmetic circuits. The user documentation is
+`README_approx.md`; read it before changing or explaining this feature. The
+libraries come from the sibling repo `../cutlass-approx-fma` (some scripts call it
+`../approximate_fma`), which has its own `CLAUDE.md`.
+
+## int8 (`USE_APPROX_INT8_GEMM=1`, the current focus)
+
+What it does: `torch._int_mm` runs on `libapprox_int8` (int8 x int8 -> int32 where
+every product goes through an approximate 8x8 multiplier, sign-magnitude), and
+float / half / bf16 GEMMs are quantized to int8 on the fly (per row / column,
+amax / 127) and run on it too, so unmodified models, attention included, use the
+approximate multiplier. Backward-pass GEMMs stay exact unless
+`TORCH_APPROX_INT8_GEMM_BACKWARD=approx`, so plain training is retraining.
+
+To use it (tell the user this when they ask how):
+
+- Build: `USE_APPROX_INT8_GEMM=1 pip install -e . -v --no-build-isolation`
+  (`build.sh` sets it), with `libapprox_int8` installed under `APPROX_INT8_ROOT`
+  (default `APPROX_BF16_ROOT`, else `/usr/local`).
+- Run: `APPROX_INT8_MUL_LUT=<mul.hex>` picks the circuit (no rebuild);
+  `TORCH_APPROX_INT8_GEMM=0` gives the exact baseline;
+  `TORCH_APPROX_INT8_GEMM_FLOAT=0` limits it to `torch._int_mm`. All are read once
+  per process.
+- Check: `torch._C._cuda_isApproxInt8GemmEnabled()`,
+  `torch._C._cuda_isApproxInt8FloatGemmEnabled()`.
+- Models: no code changes. Hugging Face models need
+  `attn_implementation="sdpa"` or `"eager"` (flash-attn bypasses ATen). Avoid
+  `torch.compile` max-autotune (Triton matmuls bypass it). Warm up before CUDA
+  graph capture (the first GEMM per device uploads the table).
+- The circuit's input `a` gets `mat2` of `mat1 @ mat2` (the weight in
+  `nn.Linear`), `b` gets `mat1`; this matters for non-symmetric multipliers.
+
+Where the code is:
+
+- `aten/src/ATen/cuda/CUDABlas.cpp`: `approxInt8Config()` (env vars),
+  `approx_int8_float_bgemm` (hook at the top of every float / half / bf16
+  `gemm` / `bgemm` specialization, `gemv<float>`), `int8_gemm` (`_int_mm`), and
+  `gemm_and_bias` returning false (no cuBLASLt epilogue path).
+- Backends that would bypass the GEMMs are switched off through
+  `CUDAHooks::usesApproxInt8FloatGemm()`: cuDNN conv (`native/Convolution.cpp`),
+  cuDNN RNN (`native/RNN.cpp`), fused attention
+  (`native/transformers/cuda/sdp_utils.cpp`), cuBLASLt addmm (`native/cuda/Blas.cpp`),
+  grouped mm (`native/cuda/GroupedBlas.cpp`).
+- Build: `caffe2/CMakeLists.txt` (links `libapprox_int8` into `torch_cuda`, include
+  path only on `CUDABlas.cpp`), `CMakeLists.txt` option, `cmake/EnvVarForwarding.cmake`.
+- Tests: `test/test_approx_int8_gemm.py`, bit-exact against the library's host
+  references (`approx_int8_gemm_host` / `approx_int8_gemm_float_host` via ctypes).
+  They skip unless the emulation is on, and need a CUDA GPU.
+
+A new multiplier needs no PyTorch rebuild. A change to
+`include/approx_int8/ops.h` in the library means rebuilding `torch_cuda`.
+
+## bf16 (`USE_APPROX_BF16_GEMM=1`)
+
+bf16 GEMMs run on approximate CUTLASS SIMT kernels in the separate
+`libtorch_approx_bf16_gemm.so` (`aten/src/ATen/native/cuda/approx_bf16/`), linked
+with `-rdc` against `libapprox_bf16_device.a`. Model changes other than the
+multiplier / adder tables need `tools/relink_approx_bf16.sh`. With both options
+built, the int8 hook runs first in the bf16 GEMMs.
+
+## Working on the fork
+
+- Keep the hooks under `#ifdef USE_APPROX_INT8_GEMM` / `USE_APPROX_BF16_GEMM`, so
+  the default build is upstream PyTorch.
+- This branch is not for upstream: don't open PRs to pytorch/pytorch from it.
+- A PyTorch build takes hours; on a machine without the build, ATen changes can
+  only be proofread. Say so, and ask the user to build and run
+  `python test/test_approx_int8_gemm.py`.

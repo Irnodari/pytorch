@@ -174,6 +174,17 @@ struct TORCH_API CUDAHooksInterface : AcceleratorHooksInterface {
     return false;
   }
 
+  // torch._int_mm runs on the approximate int8 GEMM (USE_APPROX_INT8_GEMM).
+  virtual bool usesApproxInt8Gemm() const {
+    return false;
+  }
+
+  // Float / half / bf16 GEMMs are quantized to int8 for the approximate int8
+  // GEMM too: backends that bypass GEMMs must not be used.
+  virtual bool usesApproxInt8FloatGemm() const {
+    return false;
+  }
+
   virtual long versionCuDNN() const {
     TORCH_CHECK(false, "Cannot query cuDNN version without ATen_cuda library. ", CUDA_HELP);
   }

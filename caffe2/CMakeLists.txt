@@ -1206,6 +1206,29 @@ elseif(USE_CUDA)
     target_link_libraries(torch_cuda PRIVATE torch_approx_bf16_gemm)
     install(TARGETS torch_approx_bf16_gemm EXPORT Caffe2Targets DESTINATION "${TORCH_INSTALL_LIB_DIR}")
   endif()
+  if(USE_APPROX_INT8_GEMM)
+    if(NOT APPROX_INT8_ROOT)
+      if(APPROX_BF16_ROOT)
+        set(APPROX_INT8_ROOT "${APPROX_BF16_ROOT}")
+      else()
+        set(APPROX_INT8_ROOT "/usr/local")
+      endif()
+    endif()
+    find_path(APPROX_INT8_INCLUDE_DIR approx_int8/ops.h
+      HINTS ${APPROX_INT8_ROOT}/include REQUIRED)
+    find_library(APPROX_INT8_LIB approx_int8
+      HINTS ${APPROX_INT8_ROOT}/lib REQUIRED)
+    message(STATUS "Approximate int8 GEMM: ${APPROX_INT8_LIB}")
+    # libapprox_int8 is a plain shared library with a C ABI (no relocatable
+    # device code), so torch_cuda links it directly. Only CUDABlas.cpp needs its
+    # header; keep its install prefix off the include path of everything else.
+    set_property(SOURCE "${PROJECT_SOURCE_DIR}/aten/src/ATen/cuda/CUDABlas.cpp"
+      APPEND PROPERTY INCLUDE_DIRECTORIES "${APPROX_INT8_INCLUDE_DIR}")
+    target_compile_definitions(torch_cuda PRIVATE USE_APPROX_INT8_GEMM)
+    target_link_libraries(torch_cuda PRIVATE ${APPROX_INT8_LIB})
+    get_filename_component(APPROX_INT8_LIB_DIR "${APPROX_INT8_LIB}" DIRECTORY)
+    set_property(TARGET torch_cuda APPEND PROPERTY INSTALL_RPATH "${APPROX_INT8_LIB_DIR}")
+  endif()
   if(BUILD_LAZY_CUDA_LINALG)
     add_library(torch_cuda_linalg ${ATen_CUDA_LINALG_SRCS})
     target_compile_definitions(torch_cuda_linalg PRIVATE USE_CUDA BUILD_LAZY_CUDA_LINALG)

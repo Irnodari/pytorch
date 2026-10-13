@@ -525,6 +525,10 @@ Tensor& addmm_out_cuda_impl(Tensor& result, const Tensor& self, const Tensor& ma
   bool disable_addmm_cuda_lt = persistent_disable_addmm_cuda_lt || disable_addmm_cuda_lt_override;
   // The approximate bf16 GEMM has no cuBLASLt counterpart; go straight to gemm().
   disable_addmm_cuda_lt = disable_addmm_cuda_lt || (mat1.scalar_type() == at::kBFloat16 && at::cuda::blas::approxBf16GemmEnabled());
+  // Nor the approximate int8 GEMM, which quantizes float / half / bf16.
+  disable_addmm_cuda_lt = disable_addmm_cuda_lt ||
+      ((mat1.scalar_type() == at::kFloat || mat1.scalar_type() == at::kHalf || mat1.scalar_type() == at::kBFloat16) &&
+       at::cuda::blas::approxInt8FloatGemmEnabled());
   #ifdef USE_ROCM
   // Conditioned on the device index, which is not persistent
   disable_addmm_cuda_lt = disable_addmm_cuda_lt || isGloballyDisabledAddmmCudaLt(self.device());

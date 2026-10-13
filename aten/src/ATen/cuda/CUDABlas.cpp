@@ -19,6 +19,13 @@
 #include <ATen/native/cuda/approx_bf16/ApproxBf16Gemm.h>
 #endif
 
+#ifdef USE_APPROX_INT8_GEMM
+#include <approx_int8/ops.h>
+#include <c10/cuda/CUDACachingAllocator.h>
+// get_current_node(): tells GEMMs of the backward pass from forward ones.
+#include <torch/csrc/autograd/node.h>
+#endif
+
 #ifdef USE_ROCM
 #include <c10/cuda/CUDAStream.h>
 #include <hipblaslt/hipblaslt-ext.hpp>
@@ -240,6 +247,89 @@ bool approxBf16GemmEnabled() {
   return false;
 #endif
 }
+
+namespace {
+
+// TORCH_APPROX_INT8_GEMM* settings, read once.
+struct ApproxInt8Config {
+  bool enabled = false;      // torch._int_mm through libapprox_int8
+  bool float_gemms = false;  // float / half / bf16 GEMMs quantized to int8
+  bool backward = false;     // ... in the backward pass too
+};
+
+const ApproxInt8Config& approxInt8Config() {
+  static const ApproxInt8Config config = [] {
+    ApproxInt8Config c;
+#ifdef USE_APPROX_INT8_GEMM
+    c.enabled = c10::utils::check_env("TORCH_APPROX_INT8_GEMM") != false;
+    c.float_gemms = c.enabled && c10::utils::check_env("TORCH_APPROX_INT8_GEMM_FLOAT") != false;
+    const auto backward = c10::utils::get_env("TORCH_APPROX_INT8_GEMM_BACKWARD");
+    if (backward && *backward != "exact" && *backward != "approx") {
+      TORCH_WARN("TORCH_APPROX_INT8_GEMM_BACKWARD=", *backward, " is not 'exact' or 'approx'; using 'exact'");
+    }
+    c.backward = backward == "approx";
+#endif
+    return c;
+  }();
+  return config;
+}
+
+} // namespace
+
+bool approxInt8GemmEnabled() {
+  return approxInt8Config().enabled;
+}
+
+bool approxInt8FloatGemmEnabled() {
+  return approxInt8Config().float_gemms;
+}
+
+#ifdef USE_APPROX_INT8_GEMM
+namespace {
+
+template <typename T>
+constexpr int approxInt8Type() {
+  if constexpr (std::is_same_v<T, at::Half>) {
+    return APPROX_INT8_F16;
+  } else if constexpr (std::is_same_v<T, at::BFloat16>) {
+    return APPROX_INT8_BF16;
+  } else {
+    static_assert(std::is_same_v<T, float>, "approximate int8 GEMM: float, half or bf16 only");
+    return APPROX_INT8_F32;
+  }
+}
+
+// Runs a float / half / bf16 GEMM quantized to int8 through libapprox_int8, and
+// returns true, unless that is off for this call: TORCH_APPROX_INT8_GEMM_FLOAT=0,
+// or a GEMM of the backward pass (autograd is evaluating a node) without
+// TORCH_APPROX_INT8_GEMM_BACKWARD=approx: those stay exact, which makes the
+// quantization a straight-through estimator for retraining.
+template <typename Dtype, typename C_Dtype>
+bool approx_int8_float_bgemm(CUDABLAS_BGEMM_ARGTYPES_AND_C_DTYPE(Dtype, C_Dtype)) {
+  const auto& config = approxInt8Config();
+  if (!config.float_gemms || (!config.backward && torch::autograd::get_current_node())) {
+    return false;
+  }
+  const bool trans_a = transa != 'n' && transa != 'N';
+  const bool trans_b = transb != 'n' && transb != 'N';
+  auto workspace = c10::cuda::CUDACachingAllocator::get()->allocate(
+      approx_int8_gemm_float_workspace(m, n, num_batches));
+  const int error = approx_int8_gemm_float(
+      trans_a, trans_b, m, n, k, alpha, approxInt8Type<Dtype>(), a, lda, stridea, b, ldb, strideb,
+      beta, approxInt8Type<C_Dtype>(), c, ldc, stridec, num_batches, workspace.get(),
+      at::cuda::getCurrentCUDAStream().stream());
+  TORCH_CHECK(error == 0, "at::cuda::blas: approximate int8 GEMM failed: ", cudaGetErrorString(cudaError_t(error)));
+  return true;
+}
+
+template <typename Dtype, typename C_Dtype>
+bool approx_int8_float_gemm(CUDABLAS_GEMM_ARGTYPES_AND_C_DTYPE(Dtype, C_Dtype)) {
+  return approx_int8_float_bgemm<Dtype, C_Dtype>(
+      transa, transb, m, n, k, alpha, a, lda, 0, b, ldb, 0, beta, c, ldc, 0, 1);
+}
+
+} // namespace
+#endif
 
 #ifdef USE_APPROX_BF16_GEMM
 namespace {
@@ -952,6 +1042,11 @@ void bgemm<double>(CUDABLAS_BGEMM_ARGTYPES(double)) {
 
 template <>
 void bgemm<float>(CUDABLAS_BGEMM_ARGTYPES(float)) {
+#ifdef USE_APPROX_INT8_GEMM
+  if (approx_int8_float_bgemm<float, float>(CUDABLAS_BGEMM_ARGS(float))) {
+    return;
+  }
+#endif
   auto tuning_ctx = at::cuda::tunable::getTuningContext();
   if (tuning_ctx->IsTunableOpEnabled()
       && bgemm_tunable<float>(CUDABLAS_BGEMM_ARGS(float))) {
@@ -982,6 +1077,11 @@ void bgemm<c10::complex<float>>(CUDABLAS_BGEMM_ARGTYPES(c10::complex<float>)) {
 
 template <>
 void bgemm<at::Half>(CUDABLAS_BGEMM_ARGTYPES(at::Half)) {
+#ifdef USE_APPROX_INT8_GEMM
+  if (approx_int8_float_bgemm<at::Half, at::Half>(CUDABLAS_BGEMM_ARGS(at::Half))) {
+    return;
+  }
+#endif
   auto tuning_ctx = at::cuda::tunable::getTuningContext();
   if (tuning_ctx->IsTunableOpEnabled()
       && bgemm_tunable<at::Half>(CUDABLAS_BGEMM_ARGS(at::Half))) {
@@ -992,6 +1092,11 @@ void bgemm<at::Half>(CUDABLAS_BGEMM_ARGTYPES(at::Half)) {
 
 template <>
 void bgemm<at::BFloat16>(CUDABLAS_BGEMM_ARGTYPES(at::BFloat16)) {
+#ifdef USE_APPROX_INT8_GEMM
+  if (approx_int8_float_bgemm<at::BFloat16, at::BFloat16>(CUDABLAS_BGEMM_ARGS(at::BFloat16))) {
+    return;
+  }
+#endif
 #ifdef USE_APPROX_BF16_GEMM
   if (approxBf16GemmEnabled()) {
     approx_bf16_bgemm<at::BFloat16>(CUDABLAS_BGEMM_ARGS(at::BFloat16));
@@ -1008,6 +1113,11 @@ void bgemm<at::BFloat16>(CUDABLAS_BGEMM_ARGTYPES(at::BFloat16)) {
 
 template <>
 void bgemm<at::Half, float>(CUDABLAS_BGEMM_ARGTYPES_AND_C_DTYPE(at::Half, float)) {
+#ifdef USE_APPROX_INT8_GEMM
+  if (approx_int8_float_bgemm<at::Half, float>(CUDABLAS_BGEMM_ARGS(at::Half))) {
+    return;
+  }
+#endif
   // TODO: Support tuning for Half inputs and FP32 output
   bgemm_internal<at::Half, float>(CUDABLAS_BGEMM_ARGS(at::Half));
 }
@@ -1015,6 +1125,11 @@ void bgemm<at::Half, float>(CUDABLAS_BGEMM_ARGTYPES_AND_C_DTYPE(at::Half, float)
 
 template <>
 void bgemm<at::BFloat16, float>(CUDABLAS_BGEMM_ARGTYPES_AND_C_DTYPE(at::BFloat16, float)) {
+#ifdef USE_APPROX_INT8_GEMM
+  if (approx_int8_float_bgemm<at::BFloat16, float>(CUDABLAS_BGEMM_ARGS(at::BFloat16))) {
+    return;
+  }
+#endif
 #ifdef USE_APPROX_BF16_GEMM
   if (approxBf16GemmEnabled()) {
     approx_bf16_bgemm<float>(CUDABLAS_BGEMM_ARGS(at::BFloat16));
@@ -1536,6 +1651,11 @@ void gemm<double>(CUDABLAS_GEMM_ARGTYPES(double)) {
 
 template <>
 void gemm<float>(CUDABLAS_GEMM_ARGTYPES(float)) {
+#ifdef USE_APPROX_INT8_GEMM
+  if (approx_int8_float_gemm<float, float>(CUDABLAS_GEMM_ARGS(float))) {
+    return;
+  }
+#endif
   auto tuning_ctx = at::cuda::tunable::getTuningContext();
   if (tuning_ctx->IsTunableOpEnabled()
       && gemm_tunable<float>(CUDABLAS_GEMM_ARGS(float))) {
@@ -1566,6 +1686,11 @@ void gemm<c10::complex<float>>(CUDABLAS_GEMM_ARGTYPES(c10::complex<float>)) {
 
 template <>
 void gemm<at::Half>(CUDABLAS_GEMM_ARGTYPES(at::Half)) {
+#ifdef USE_APPROX_INT8_GEMM
+  if (approx_int8_float_gemm<at::Half, at::Half>(CUDABLAS_GEMM_ARGS(at::Half))) {
+    return;
+  }
+#endif
   auto tuning_ctx = at::cuda::tunable::getTuningContext();
   if (tuning_ctx->IsTunableOpEnabled()
       && gemm_tunable<at::Half>(CUDABLAS_GEMM_ARGS(at::Half))) {
@@ -1576,6 +1701,11 @@ void gemm<at::Half>(CUDABLAS_GEMM_ARGTYPES(at::Half)) {
 
 template <>
 void gemm<at::BFloat16>(CUDABLAS_GEMM_ARGTYPES(at::BFloat16)) {
+#ifdef USE_APPROX_INT8_GEMM
+  if (approx_int8_float_gemm<at::BFloat16, at::BFloat16>(CUDABLAS_GEMM_ARGS(at::BFloat16))) {
+    return;
+  }
+#endif
 #ifdef USE_APPROX_BF16_GEMM
   if (approxBf16GemmEnabled()) {
     approx_bf16_bgemm<at::BFloat16>(transa, transb, m, n, k, alpha, a, lda, 0, b, ldb, 0, beta, c, ldc, 0, 1);
@@ -1592,6 +1722,11 @@ void gemm<at::BFloat16>(CUDABLAS_GEMM_ARGTYPES(at::BFloat16)) {
 
 template <>
 void gemm<at::Half, float>(CUDABLAS_GEMM_ARGTYPES_AND_C_DTYPE(at::Half, float)) {
+#ifdef USE_APPROX_INT8_GEMM
+  if (approx_int8_float_gemm<at::Half, float>(CUDABLAS_GEMM_ARGS(at::Half))) {
+    return;
+  }
+#endif
   // TODO: Support Tuning for fp16-fp32 gemm
   gemm_internal<at::Half, float>(CUDABLAS_GEMM_ARGS(at::Half));
 }
@@ -1599,6 +1734,11 @@ void gemm<at::Half, float>(CUDABLAS_GEMM_ARGTYPES_AND_C_DTYPE(at::Half, float)) 
 
 template <>
 void gemm<at::BFloat16, float>(CUDABLAS_GEMM_ARGTYPES_AND_C_DTYPE(at::BFloat16, float)) {
+#ifdef USE_APPROX_INT8_GEMM
+  if (approx_int8_float_gemm<at::BFloat16, float>(CUDABLAS_GEMM_ARGS(at::BFloat16))) {
+    return;
+  }
+#endif
 #ifdef USE_APPROX_BF16_GEMM
   if (approxBf16GemmEnabled()) {
     approx_bf16_bgemm<float>(transa, transb, m, n, k, alpha, a, lda, 0, b, ldb, 0, beta, c, ldc, 0, 1);
@@ -1642,6 +1782,11 @@ bool gemm_and_bias(
   // Returning false makes every caller fall back to gemm(), which routes bf16
   // through the approximate CUTLASS GEMM.
   if (std::is_same_v<Dtype, at::BFloat16> && approxBf16GemmEnabled()) {
+    return false;
+  }
+  // Likewise for the approximate int8 GEMM, which quantizes float / half / bf16.
+  if ((std::is_same_v<Dtype, float> || std::is_same_v<Dtype, at::Half> ||
+       std::is_same_v<Dtype, at::BFloat16>) && approxInt8FloatGemmEnabled()) {
     return false;
   }
 
@@ -2267,6 +2412,16 @@ void int8_gemm(
     int64_t mat2_ld,
     int32_t* result_ptr,
     int64_t result_ld) {
+#ifdef USE_APPROX_INT8_GEMM
+  if (approxInt8GemmEnabled()) {
+    const int error = approx_int8_gemm(
+        transpose_mat1, transpose_mat2, m, n, k, mat1_ptr, mat1_ld, 0, mat2_ptr, mat2_ld, 0,
+        result_ptr, result_ld, 0, 1, at::cuda::getCurrentCUDAStream().stream());
+    TORCH_CHECK(error == 0, "at::cuda::blas::int8_gemm: approximate int8 GEMM failed: ",
+                cudaGetErrorString(cudaError_t(error)));
+    return;
+  }
+#endif
 
   cublasComputeType_t computeType = CUBLAS_COMPUTE_32I;
   cudaDataType_t scaleType = CUDA_R_32I;
@@ -2676,6 +2831,18 @@ void gemv<double>(CUDABLAS_GEMV_ARGTYPES(double)) {
 
 template <>
 void gemv<float>(CUDABLAS_GEMV_ARGTYPES(float)) {
+#ifdef USE_APPROX_INT8_GEMM
+  // As a one-row gemm, the way gemv<at::Half> does it (see there), so that the
+  // approximate int8 GEMM takes it.
+  if (approxInt8FloatGemmEnabled()) {
+    const bool trans_bool = detail::cublasOpFromChar(trans) != CUBLAS_OP_N;
+    const int64_t out = trans_bool ? n : m, summed = trans_bool ? m : n;
+    if (approx_int8_float_gemm<float, float>(
+            'n', trans_bool ? 'n' : 't', 1, out, summed, alpha, x, incx, a, lda, beta, y, incy)) {
+      return;
+    }
+  }
+#endif
   // gemv is bw bound, and does not benefit from TF32. But the precision
   // loss still happens on TF32. So we disable it here.
   NoTF32Guard disable_tf32;

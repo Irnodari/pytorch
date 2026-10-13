@@ -174,6 +174,10 @@ bool use_cudnn(const Tensor& t) {
   // With the approximate bf16 GEMM, bf16 uses the native cells, whose linear/matmul it emulates.
   bool bfloat16_cond = st == kBFloat16 && at::detail::getCUDAHooks().supportsBFloat16RNNWithCuDNN() &&
       !at::detail::getCUDAHooks().usesApproxBf16Gemm();
+  // With the approximate int8 GEMM, float / half / bf16 use the native cells too.
+  if ((st == kFloat || st == kHalf || st == kBFloat16) && at::detail::getCUDAHooks().usesApproxInt8FloatGemm()) {
+    return false;
+  }
   return acceptable && (bfloat16_cond || st == kDouble || st == kFloat || st == kHalf);
 }
 

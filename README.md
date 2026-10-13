@@ -6,6 +6,25 @@
 
 --------------------------------------------------------------------------------
 
+> **Approximate arithmetic fork.** This branch (`int8`) can run CUDA matmuls
+> through emulated approximate arithmetic circuits, from `../cutlass-approx-fma`:
+>
+> - `USE_APPROX_INT8_GEMM=1`: every float / half / bf16 matmul (linear layers,
+>   attention, convolutions) is quantized to int8 and multiplied by an approximate
+>   8x8 multiplier, and `torch._int_mm` too. Models run unchanged, and training them
+>   retrains for the multiplier (the backward pass stays exact).
+>   ```sh
+>   USE_APPROX_INT8_GEMM=1 pip install -e . -v --no-build-isolation
+>   APPROX_INT8_MUL_LUT=/path/to/mul.hex python train.py   # TORCH_APPROX_INT8_GEMM=0: exact
+>   ```
+> - `USE_APPROX_BF16_GEMM=1`: bf16 GEMMs through a bit-accurate bf16 fma model.
+>
+> See [README_approx.md](README_approx.md) for building, every environment
+> variable, what is and isn't emulated, and the tests. The rest of this file is
+> the upstream README.
+
+--------------------------------------------------------------------------------
+
 PyTorch is a Python package that provides two high-level features:
 - Tensor computation (like NumPy) with strong GPU acceleration
 - Deep neural networks built on a tape-based autograd system

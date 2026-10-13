@@ -739,7 +739,10 @@ const std::optional<at::Tensor>& bias,
 std::optional<c10::ScalarType> out_dtype) {
   _grouped_mm_validate_inputs(mat_a, mat_b, offs, bias, out_dtype);
   // The fallback runs one mm per group, which goes through the approximate bf16 GEMM.
-  const bool use_approx_bf16 = mat_a.dtype() == at::kBFloat16 && at::cuda::blas::approxBf16GemmEnabled();
+  // Likewise for the approximate int8 GEMM (float / half / bf16).
+  const bool use_approx_bf16 = (mat_a.dtype() == at::kBFloat16 && at::cuda::blas::approxBf16GemmEnabled()) ||
+      ((mat_a.dtype() == at::kFloat || mat_a.dtype() == at::kHalf || mat_a.dtype() == at::kBFloat16) &&
+       at::cuda::blas::approxInt8FloatGemmEnabled());
 #if !defined(USE_ROCM) && defined(CUDA_VERSION) && CUDA_VERSION >= 13030
   if (!use_approx_bf16 && should_use_cublaslt_grouped_gemm(mat_a, mat_b, offs, out_dtype)) {
     return grouped_mm_cublaslt(mat_a, mat_b, offs, bias, out_dtype);

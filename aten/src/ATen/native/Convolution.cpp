@@ -419,6 +419,11 @@ struct ConvParams {
         return false;
       }
     }
+    // cuDNN would bypass the approximate int8 GEMM; use the im2col + GEMM backends instead.
+    if (at::isFloatingType(input.scalar_type()) && input.scalar_type() != at::kDouble &&
+        detail::getCUDAHooks().usesApproxInt8FloatGemm()) {
+      return false;
+    }
     if (input.scalar_type() == at::kBFloat16 || weight.scalar_type() == at::kBFloat16) {
       // cuDNN would bypass the approximate bf16 GEMM; use the im2col + GEMM backends instead.
       if (detail::getCUDAHooks().usesApproxBf16Gemm()) {
@@ -445,6 +450,10 @@ struct ConvParams {
       return false;
     }
     if (input.scalar_type() == at::kBFloat16 && detail::getCUDAHooks().usesApproxBf16Gemm()) {
+      return false;
+    }
+    if (at::isFloatingType(input.scalar_type()) && input.scalar_type() != at::kDouble &&
+        detail::getCUDAHooks().usesApproxInt8FloatGemm()) {
       return false;
     }
     // native kernel doesn't support 64-bit non-splittable case
