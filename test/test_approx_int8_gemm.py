@@ -45,6 +45,14 @@ def library():
     return lib
 
 
+def multiplier_is_exact():
+    """True if every product of the loaded multiplier is a * b."""
+    lib = library()
+    lib.approx_int8_mag_table.restype = ctypes.POINTER(ctypes.c_uint16)
+    mag = lib.approx_int8_mag_table()
+    return all(mag[a * 129 + b] == a * b for a in range(129) for b in range(129))
+
+
 def reference_int_mm(x, y):
     """torch._int_mm(x, y) for int8 x (M x K), y (K x N)."""
     x, y = x.cpu().contiguous(), y.cpu().contiguous()
@@ -159,7 +167,10 @@ class TestApproxInt8Gemm(TestCase):
         want = F.conv2d(x.double(), w.double(), padding=1)  # fp64 is not emulated
         err = float((got.double() - want).abs().max() / want.abs().max())
         self.assertGreater(err, 1e-6)  # quantized ...
-        self.assertLess(err, 5e-2)  # ... but close
+        # ... but close: int8 rounding alone stays within a few percent.  An
+        # approximate multiplier adds its own error (the GEMM tests check it bit
+        # for bit), so then only rule out garbage.
+        self.assertLess(err, 5e-2 if multiplier_is_exact() else 1.0)
 
 
 instantiate_device_type_tests(TestApproxInt8Gemm, globals(), only_for="cuda")

@@ -174,6 +174,8 @@ Read once per process, so set them before starting Python. None needs a rebuild.
 | `TORCH_APPROX_INT8_GEMM` | `1` | `0` turns the emulation off: `_int_mm` goes back to cuBLASLt, float GEMMs to cuBLAS, and conv, attention and RNN to their usual backends. |
 | `TORCH_APPROX_INT8_GEMM_FLOAT` | `1` | `0` emulates `torch._int_mm` only; float / half / bf16 GEMMs stay exact. |
 | `TORCH_APPROX_INT8_GEMM_BACKWARD` | `exact` | `approx` quantizes the GEMMs of the backward pass too. By default they stay exact (cuBLAS), so the quantization acts as a straight-through estimator: the usual setting for retraining a network for an approximate multiplier. |
+| `APPROX_INT8_GEMM_PATH` | `auto` | `libapprox_int8` runs multipliers whose table factors into few int8 features on the tensor cores (bit-identical, roughly one int8 GEMM per feature) and the others on its lookup kernel. `tensor` / `lookup` force one; see `cutlass-approx-fma`'s README ("Two GPU paths"). `APPROX_INT8_TC_MAX_FEATURES` (64) is the threshold of `auto`. |
+| `APPROX_INT8_TC_WORKSPACE_MB` | `1024` | Workspace of the tensor-core path, from a memory pool of the library: outside PyTorch's caching allocator, so leave room for it. |
 | `APPROX_INT8_MUL_LUT` | unset | A multiplier table file to use instead of the model compiled into `libapprox_int8` (`src/int8_model.h`): the `mul.hex` that `make_luts` / `make_luts_rtl` write, 65536 16-bit products at `(a << 8) \| b`. |
 
 ### Which operand goes to which multiplier input
@@ -276,6 +278,24 @@ can't happen during CUDA graph capture: run a warm-up iteration first.
 `libapprox_int8` is linked like any shared library and reads its table at run time:
 point `APPROX_INT8_MUL_LUT` at a new `mul.hex`, or edit `src/int8_model.h` and
 rebuild and install `cutlass-approx-fma`. PyTorch is not rebuilt or relinked.
+
+## Measuring the cost: `tools/bench_approx_int8.py`
+
+Runs GEMMs (`_int_mm`, bf16 / fp16 `mm`, `linear`, `bmm`), attention and whole models
+(a BERT-base encoder for inference and a training step, convs, ResNet-50 with
+torchvision) twice, in separate processes: with `TORCH_APPROX_INT8_GEMM=0` (cuBLASLt
+int8 and cuBLAS bf16 on the tensor cores, flash attention, cuDNN) and with it on.
+Reports time, TOPS, the slowdown, and from one profiled call the share of GPU time in
+tensor-core-looking kernels and in `libapprox_int8`'s kernels (`--kernels` lists them).
+
+```sh
+python tools/bench_approx_int8.py --json results.json   # --only 'gemm|sdpa' for a subset
+python tools/bench_approx_int8.py --load results.json --kernels
+```
+
+`APPROX_INT8_MUL_LUT`, `APPROX_INT8_GEMM_PATH` and `TORCH_APPROX_INT8_GEMM_FLOAT` / `_BACKWARD`
+pass through to the emulated run. On the tensor-core path of `libapprox_int8`, its cuBLASLt
+int8 GEMMs count as tensor-core time and its expansion kernels as emulation time. `cutlass-approx-fma`'s `bench_int8_tc` compares the bare GEMMs, without PyTorch.
 
 ## Tests: `test/test_approx_int8_gemm.py`
 
